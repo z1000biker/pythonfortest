@@ -6,12 +6,6 @@ This project compares the performance of three different approaches for calculat
 2. A JIT-compiled function using Numba, which can leverage SIMD instructions like AVX.
 3. A multithreaded approach using Python's `threading` module.
 
-## Table of Contents
-
-- [Installation](#installation)
-- [Usage](#usage)
-- [Performance Comparison](#performance-comparison)
-- [Requirements](#requirements)
 
 
 ## Installation
