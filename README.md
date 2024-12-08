@@ -6,7 +6,7 @@ This project compares the performance of three different approaches for calculat
 2. A JIT-compiled function using Numba, which can leverage SIMD instructions like AVX.
 3. A multithreaded approach using Python's `threading` module.
 
-#Table of Contents
+Table of Contents
 
 - [Installation](#installation)
 - [Usage](#usage)
@@ -47,5 +47,5 @@ The script measures the execution time of each approach over 10 runs and prints 
 
 #License
 
-This project is licensed under the MIT License. See the LICENSE file for details.
+This project is licensed under the MIT License.
 
