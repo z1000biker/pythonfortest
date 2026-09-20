@@ -21,6 +21,7 @@ jobs:
           install: >-
             git
             make
+            python
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
@@ -43,11 +44,91 @@ jobs:
           cmake --build libacars/build --parallel
           cmake --install libacars/build
 
-      - name: Build dumpvdl2 2.7.0 with RTL-SDR
+      - name: Build dumpvdl2 2.7.0 with Windows compatibility patch
         shell: msys2 {0}
         run: |
           set -euxo pipefail
           git clone --depth 1 --branch v2.7.0 https://github.com/szpajder/dumpvdl2.git
+
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("dumpvdl2/src/dumpvdl2.c")
+          s = p.read_text(encoding="utf-8")
+
+          marker = "pthread_barrier_t demods_ready, samples_ready;\n"
+          compat = r'''
+          #ifdef _WIN32
+          static char *win_strsep(char **stringp, const char *delim) {
+              char *start = *stringp;
+              char *p;
+              if(start == NULL) return NULL;
+              p = start + strcspn(start, delim);
+              if(*p) {
+                  *p = '\0';
+                  *stringp = p + 1;
+              } else {
+                  *stringp = NULL;
+              }
+              return start;
+          }
+
+          static char *win_strndup(const char *src, size_t n) {
+              size_t len = strlen(src);
+              if(len > n) len = n;
+              char *dst = malloc(len + 1);
+              if(dst == NULL) return NULL;
+              memcpy(dst, src, len);
+              dst[len] = '\0';
+              return dst;
+          }
+
+          #define strsep win_strsep
+          #define strndup win_strndup
+          #endif
+          '''
+          if compat.strip() not in s:
+              s = s.replace(marker, marker + compat + "\n", 1)
+
+          old = r'''static void setup_signals() {
+              struct sigaction sigact, pipeact;
+
+              memset(&sigact, 0, sizeof(sigact));
+              memset(&pipeact, 0, sizeof(pipeact));
+              pipeact.sa_handler = SIG_IGN;
+              sigact.sa_handler = &sighandler;
+              sigaction(SIGPIPE, &pipeact, NULL);
+              sigaction(SIGHUP, &sigact, NULL);
+              sigaction(SIGINT, &sigact, NULL);
+              sigaction(SIGQUIT, &sigact, NULL);
+              sigaction(SIGTERM, &sigact, NULL);
+          }'''
+          old = old.replace("    ", "\t")
+          new = r'''static void setup_signals() {
+          #ifdef _WIN32
+              signal(SIGINT, sighandler);
+              signal(SIGTERM, sighandler);
+          #else
+              struct sigaction sigact, pipeact;
+
+              memset(&sigact, 0, sizeof(sigact));
+              memset(&pipeact, 0, sizeof(pipeact));
+              pipeact.sa_handler = SIG_IGN;
+              sigact.sa_handler = &sighandler;
+              sigaction(SIGPIPE, &pipeact, NULL);
+              sigaction(SIGHUP, &sigact, NULL);
+              sigaction(SIGINT, &sigact, NULL);
+              sigaction(SIGQUIT, &sigact, NULL);
+              sigaction(SIGTERM, &sigact, NULL);
+          #endif
+          }'''
+          new = new.replace("    ", "\t")
+
+          if old not in s:
+              raise SystemExit("setup_signals block not found")
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding="utf-8")
+          PY
+
           cmake -S dumpvdl2 -B dumpvdl2/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DRTLSDR=TRUE \
