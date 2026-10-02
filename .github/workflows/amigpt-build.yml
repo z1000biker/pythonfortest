@@ -50,7 +50,13 @@ jobs:
           if '#include <dos/dostags.h>' not in s:
               s='#include <dos/dostags.h>\n'+s
           p.write_text(s)
-          print('NDK compatibility fixes applied')
+
+          p=Path('AmiGPT68K/Makefile')
+          s=p.read_text()
+          if '-lnet' in s:
+              s=s.replace(' -lnet','')
+          p.write_text(s)
+          print('NDK/link compatibility fixes applied')
           PY
 
       - name: Run portable core tests
