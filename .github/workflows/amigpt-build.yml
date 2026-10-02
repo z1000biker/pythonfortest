@@ -1,0 +1,81 @@
+name: AmiGPT 68K Build
+
+on:
+  push:
+    branches: [amigpt-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reassemble source bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat amigpt-src.part_* > /tmp/amigpt-src.tgz.b64
+          base64 -d /tmp/amigpt-src.tgz.b64 > /tmp/amigpt-src.tgz
+          tar -xzf /tmp/amigpt-src.tgz
+          test -f AmiGPT68K/Makefile
+          echo "source bundle restored"
+
+      - name: Run portable core tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C AmiGPT68K clean test
+
+      - name: Build AmigaOS 68K executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD/AmiGPT68K:/src" \
+            -w /src \
+            docker.io/amigadev/crosstools:m68k-amigaos-gcc10 \
+            sh -lc 'm68k-amigaos-gcc --version && make clean && make amiga-all'
+
+      - name: Verify HUNK executables
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          for n in ['AmiGPT020','AmiGPT030FPU','AmiGPT040']:
+              p=Path('AmiGPT68K/build/amiga')/n
+              if not p.exists():
+                  raise SystemExit(f'missing {p}')
+              data=p.read_bytes()
+              if len(data) < 4:
+                  raise SystemExit(f'too short {p}')
+              magic=struct.unpack('>I', data[:4])[0]
+              print(n, len(data), hex(magic))
+              if magic != 0x3f3:
+                  raise SystemExit(f'not HUNK: {p}')
+          PY
+
+      - name: Package executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for n in AmiGPT020 AmiGPT030FPU AmiGPT040; do
+            cp "AmiGPT68K/build/amiga/$n" dist/
+            cp "AmiGPT68K/build/amiga/$n.info" dist/
+          done
+          cp AmiGPT68K/icons/AmiWebAuth.info dist/
+          cp AmiGPT68K/README.md dist/README-source-status.txt
+          (cd dist && zip -9 ../AmiGPT68K-real-build.zip *)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AmiGPT68K-real-build
+          path: AmiGPT68K-real-build.zip
+          if-no-files-found: error
