@@ -1,0 +1,131 @@
+name: AmiGPT 68K v0.7 Cross Build
+
+on:
+  push:
+    branches: [amigpt-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reassemble v0.3 baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat amigpt-src.part_00 amigpt-src.part_01 amigpt-src.part_02 amigpt-src.part_03 \
+              amigpt-src.part_04_00 amigpt-src.part_04_01 \
+              amigpt-src.part_05_00 amigpt-src.part_05_01 \
+              amigpt-src.part_06_00 amigpt-src.part_06_01 \
+              amigpt-src.part_07_00 amigpt-src.part_07_01 > /tmp/amigpt-src.tgz.b64
+          base64 -d /tmp/amigpt-src.tgz.b64 > /tmp/amigpt-src.tgz
+          tar -xzf /tmp/amigpt-src.tgz
+          cat amigpt-v02-overlay.part_00 amigpt-v02-overlay.part_01 amigpt-v02-overlay.part_02 amigpt-v02-overlay.part_03 > /tmp/amigpt-v02-overlay.tgz.b64
+          base64 -d /tmp/amigpt-v02-overlay.tgz.b64 > /tmp/amigpt-v02-overlay.tgz
+          tar -xzf /tmp/amigpt-v02-overlay.tgz -C AmiGPT68K
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('AmiGPT68K/src/amiga/amiga_crypto.c')
+          s=p.read_text()
+          if '#include <utility/tagitem.h>' not in s:
+              s=s.replace('#include <proto/amisslmaster.h>', '#include <utility/tagitem.h>\n#include <proto/amisslmaster.h>', 1)
+          p.write_text(s)
+          p=Path('AmiGPT68K/src/amiga/oauth_loopback.c')
+          p.write_text(p.read_text().replace('INADDR_LOOPBACK','0x7f000001UL'))
+          p=Path('AmiGPT68K/src/amiga/login_flow.c')
+          s=p.read_text()
+          if '#include <dos/dostags.h>' not in s:
+              s='#include <dos/dostags.h>\n'+s
+          p.write_text(s)
+          p=Path('AmiGPT68K/src/amiga/main_cli.c')
+          s=p.read_text()
+          if '$STACK:131072' not in s:
+              s=s.replace('#include <stdio.h>\n','#include <stdio.h>\n\nconst char stack_size[] = "$STACK:131072";\n',1)
+          p.write_text(s)
+          for fn,var in [('AmiGPT68K/src/amiga/amiga_crypto.c','socket_base'),('AmiGPT68K/src/amiga/amiga_tls.c','SocketBase')]:
+              p=Path(fn); s=p.read_text()
+              if '#include <errno.h>' not in s:
+                  s=s.replace('#include <stdio.h>','#include <stdio.h>\n#include <errno.h>',1)
+              if 'AmiSSL_ErrNoPtr' not in s:
+                  s=s.replace(f'AmiSSL_SocketBase,(ULONG){var},TAG_DONE)',f'AmiSSL_SocketBase,(ULONG){var},\n        AmiSSL_ErrNoPtr,(ULONG)&errno,TAG_DONE)',1)
+              p.write_text(s)
+          PY
+
+      - name: Apply audited v0.7 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d amigpt-v07.patch.gz.b64 | gzip -d > /tmp/v07.patch
+          cd AmiGPT68K
+          patch -p1 < /tmp/v07.patch
+          test "$(grep -R 'OpenLibrary((STRPTR)\"bsdsocket.library\"' -n src/amiga | wc -l)" -eq 1
+          test "$(grep -R 'OpenLibrary((STRPTR)\"amisslmaster.library\"' -n src/amiga | wc -l)" -eq 1
+          test "$(grep -R 'OpenAmiSSLTags' -n src/amiga | grep -v 'failed' | wc -l)" -eq 1
+          grep -q 'unsigned long __stack = 131072UL' src/amiga/main_cli.c
+          ! grep -R '\$STACK:131072' -n src/amiga
+          grep -q 'TLS handshake failed: ssl=' src/amiga/amiga_tls.c
+
+      - name: Run portable core tests
+        run: make -C AmiGPT68K clean test
+
+      - name: Build AmigaOS 68K executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/AmiGPT68K:/src" -w /src \
+            docker.io/amigadev/crosstools:m68k-amigaos \
+            sh -c 'set -e; export PATH=/opt/m68k-amigaos/bin:$PATH; make clean; make amiga-all; command -v m68k-amigaos-nm; m68k-amigaos-nm build/amiga/AmiGPT040 | grep __stack'
+
+      - name: Verify HUNK binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct,subprocess
+          for n in ['AmiGPT020','AmiGPT030FPU','AmiGPT040']:
+              p=Path('AmiGPT68K/build/amiga')/n
+              d=p.read_bytes()
+              assert struct.unpack('>I',d[:4])[0]==0x3f3
+              st=subprocess.check_output(['strings',str(p)],text=True,errors='ignore')
+              for x in ['AmiGPT 68K v0.7 runtime-fix','TLS handshake failed: ssl=','DEVICELOGIN','auth.openai.com']:
+                  assert x in st,(n,x)
+              assert '$STACK:131072' not in st
+              print(n,len(d),'HUNK verified')
+          PY
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/bin
+          for n in AmiGPT020 AmiGPT030FPU AmiGPT040; do
+            cp AmiGPT68K/build/amiga/$n dist/bin/
+            cp AmiGPT68K/build/amiga/$n.info dist/bin/
+          done
+          printf '%s\n' \
+            'AmiGPT 68K v0.7 runtime fix' \
+            'One bsdsocket.library + one AmiSSL instance per process' \
+            'One shared SSL_CTX for HTTPS connections' \
+            'Large auth/profile/token/JWT buffers moved out of stack' \
+            'libnix __stack=131072 used instead of $STACK marker' \
+            'TLS failure reports SSL verify result, errno, clock year and OpenSSL error' > dist/bin/BUILD-VERIFIED.txt
+          (cd dist/bin && zip -9 ../../AmiGPT68K-v0.7-RUNTIMEFIX.zip *)
+          cp -a AmiGPT68K dist/AmiGPT68K-v0.7-source
+          rm -rf dist/AmiGPT68K-v0.7-source/build
+          (cd dist && zip -qr ../AmiGPT68K-v0.7-SOURCE.zip AmiGPT68K-v0.7-source)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AmiGPT68K-v0.7-runtimefix
+          path: |
+            AmiGPT68K-v0.7-RUNTIMEFIX.zip
+            AmiGPT68K-v0.7-SOURCE.zip
+          if-no-files-found: error
