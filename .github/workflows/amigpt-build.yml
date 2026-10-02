@@ -39,7 +39,7 @@ jobs:
           echo "5538bcd282240bbe37360f2ebf4a4d995e78b4bbd765aa739982336fb5933712  /tmp/amigpt-v02-overlay.tgz.b64" | sha256sum -c -
           base64 -d /tmp/amigpt-v02-overlay.tgz.b64 > /tmp/amigpt-v02-overlay.tgz
           echo "302dbbcbbaa73f4c5974e8f9dde617a7cedf1e3fe6512e5421ec4d788da9b270  /tmp/amigpt-v02-overlay.tgz" | sha256sum -c -
-          tar -xzf /tmp/amigpt-v02-overlay.tgz
+          tar -xzf /tmp/amigpt-v02-overlay.tgz -C AmiGPT68K
           grep -q DEVICELOGIN AmiGPT68K/src/amiga/main_cli.c
           echo "v0.2 overlay applied"
 
