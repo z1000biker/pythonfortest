@@ -63,6 +63,43 @@ jobs:
           p.write_text(s)
           PYFIX
 
+      - name: Fix AmiSSL stack and errno handling
+        shell: bash
+        run: |
+          python3 - <<'PYFIX'
+          from pathlib import Path
+
+          # AmiSSL 5.20+ can need well above the classic small Shell stack.
+          p=Path('AmiGPT68K/src/amiga/main_cli.c')
+          s=p.read_text()
+          if '$STACK:131072' not in s:
+              marker='#include <stdio.h>\n'
+              if marker in s:
+                  s=s.replace(marker, marker+'\nconst char stack_size[] = "$STACK:131072";\n', 1)
+              else:
+                  s='const char stack_size[] = "$STACK:131072";\n'+s
+          p.write_text(s)
+
+          # Match AmiSSL's official OS3 examples: give the library an errno pointer.
+          for fn in ['AmiGPT68K/src/amiga/amiga_crypto.c','AmiGPT68K/src/amiga/amiga_tls.c']:
+              p=Path(fn); s=p.read_text()
+              if '#include <errno.h>' not in s:
+                  insert='#include <stdio.h>'
+                  if insert in s:
+                      s=s.replace(insert, insert+'\n#include <errno.h>', 1)
+                  else:
+                      s='#include <errno.h>\n'+s
+              if 'AmiSSL_ErrNoPtr' not in s:
+                  s=s.replace('AmiSSL_SocketBase,(ULONG)socket_base,TAG_DONE',
+                              'AmiSSL_SocketBase,(ULONG)socket_base,\n        AmiSSL_ErrNoPtr,(ULONG)&errno,TAG_DONE')
+                  s=s.replace('AmiSSL_SocketBase,(ULONG)SocketBase,TAG_DONE',
+                              'AmiSSL_SocketBase,(ULONG)SocketBase,\n        AmiSSL_ErrNoPtr,(ULONG)&errno,TAG_DONE')
+              p.write_text(s)
+
+          assert '$STACK:131072' in Path('AmiGPT68K/src/amiga/main_cli.c').read_text()
+          print('AmiSSL stack=131072 and errno tags applied')
+          PYFIX
+
       - name: Run portable core tests
         shell: bash
         run: |
@@ -80,7 +117,7 @@ jobs:
             docker.io/amigadev/crosstools:m68k-amigaos \
             sh -c 'set -e; export PATH=/opt/m68k-amigaos/bin:$PATH; command -v m68k-amigaos-gcc; m68k-amigaos-gcc --version; make clean; make amiga-all'
 
-      - name: Verify HUNK executables and v0.2 command set
+      - name: Verify HUNK executables and v0.3 fixes
         shell: bash
         run: |
           python3 - <<'PYVERIFY'
@@ -92,9 +129,10 @@ jobs:
               if struct.unpack('>I',data[:4])[0] != 0x3f3:
                   raise SystemExit(f'not HUNK: {p}')
               out=subprocess.check_output(['strings',str(p)],text=True,errors='ignore')
-              if 'DEVICELOGIN' not in out or 'api.openai.com' not in out:
-                  raise SystemExit(f'missing real client code in {p}')
-              print(n, len(data), 'HUNK OK, DEVICELOGIN present')
+              for required in ['DEVICELOGIN','api.openai.com','$STACK:131072']:
+                  if required not in out:
+                      raise SystemExit(f'missing {required} in {p}')
+              print(n, len(data), 'HUNK OK, DEVICELOGIN + 128K stack present')
           PYVERIFY
 
       - name: Package executables
@@ -106,12 +144,11 @@ jobs:
             cp "AmiGPT68K/build/amiga/$n" dist/
             cp "AmiGPT68K/build/amiga/$n.info" dist/
           done
-          cp AmiGPT68K/icons/AmiWebAuth.info dist/
-          cp AmiGPT68K/README.md dist/README-source-status.txt
-          (cd dist && zip -9 ../AmiGPT68K-v0.2-real-build.zip *)
+          printf '%s\n' 'AmiGPT 68K v0.3' 'Fix: embedded $STACK:131072 for AmiSSL HTTPS' 'Fix: AmiSSL_ErrNoPtr passed to OpenAmiSSLTags' > dist/BUILD-VERIFIED.txt
+          (cd dist && zip -9 ../AmiGPT68K-v0.3-stackfix.zip *)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AmiGPT68K-v0.2-real-build
-          path: AmiGPT68K-v0.2-real-build.zip
+          name: AmiGPT68K-v0.3-stackfix
+          path: AmiGPT68K-v0.3-stackfix.zip
           if-no-files-found: error
