@@ -77,8 +77,8 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD/AmiGPT68K:/src" \
             -w /src \
-            docker.io/amigadev/crosstools:m68k-amigaos-gcc10 \
-            sh -lc 'set -e; m68k-amigaos-gcc --version; make clean; make amiga-all'
+            docker.io/amigadev/crosstools:m68k-amigaos \
+            sh -c 'set -e; export PATH=/opt/m68k-amigaos/bin:$PATH; command -v m68k-amigaos-gcc; m68k-amigaos-gcc --version; make clean; make amiga-all'
 
       - name: Verify HUNK executables and v0.2 command set
         shell: bash
