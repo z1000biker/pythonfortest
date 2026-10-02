@@ -1,4 +1,4 @@
-name: AmiGPT 68K v0.4 TLS Debug Build
+name: AmiGPT 68K v0.5 Conservative Device Debug
 
 on:
   push:
@@ -30,13 +30,12 @@ jobs:
           base64 -d /tmp/amigpt-v02-overlay.tgz.b64 > /tmp/amigpt-v02-overlay.tgz
           tar -xzf /tmp/amigpt-v02-overlay.tgz -C AmiGPT68K
 
-      - name: Apply NDK and TLS v0.4 fixes
+      - name: Apply v0.5 conservative fixes and checkpoints
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          # NDK compatibility fixes already proven by previous builds.
           p=Path('AmiGPT68K/src/amiga/amiga_crypto.c')
           s=p.read_text()
           if '#include <utility/tagitem.h>' not in s:
@@ -50,57 +49,44 @@ jobs:
               s='#include <dos/dostags.h>\n'+s
           p.write_text(s)
 
-          # Main executable stack and version marker.
           p=Path('AmiGPT68K/src/amiga/main_cli.c')
           s=p.read_text()
           if '$STACK:131072' not in s:
               s=s.replace('#include <stdio.h>\n','#include <stdio.h>\n\nconst char stack_size[] = "$STACK:131072";\n',1)
-          s=s.replace('AmiGPT 68K v0.2','AmiGPT 68K v0.4')
-          s=s.replace('(official ChatGPT/Codex device auth)','(Codex device auth diagnostic; not final SIWC flow)')
+          s=s.replace('AmiGPT 68K v0.2','AmiGPT 68K v0.5')
           p.write_text(s)
 
-          # DEVICELOGIN previously opened one global AmiSSL instance and then each
-          # HTTPS request opened another. Remove the unnecessary outer instance.
-          p=Path('AmiGPT68K/src/amiga/device_auth.c')
-          s=p.read_text()
-          s=s.replace('#include "amiga_crypto.h"\n','')
-          s=s.replace('    if(amigpt_crypto_open(SocketBase,err,errcap)<0)goto out;\n','')
-          s=s.replace('goto out_crypto;','goto out;')
-          s=s.replace('out_crypto:\n    amigpt_crypto_close();\n','')
-          p.write_text(s)
+          for fn in ['AmiGPT68K/src/amiga/amiga_crypto.c','AmiGPT68K/src/amiga/amiga_tls.c']:
+              p=Path(fn); s=p.read_text()
+              if '#include <errno.h>' not in s:
+                  s=s.replace('#include <stdio.h>','#include <stdio.h>\n#include <errno.h>',1)
+              s=s.replace('AmiSSL_SocketBase,(ULONG)socket_base,TAG_DONE)',
+                          'AmiSSL_SocketBase,(ULONG)socket_base,\n        AmiSSL_ErrNoPtr,(ULONG)&errno,TAG_DONE)')
+              s=s.replace('AmiSSL_SocketBase,(ULONG)SocketBase,TAG_DONE)',
+                          'AmiSSL_SocketBase,(ULONG)SocketBase,\n        AmiSSL_ErrNoPtr,(ULONG)&errno,TAG_DONE)')
+              p.write_text(s)
 
-          # TLS transport: one AmiSSL opener per HTTPS connection, proper errno,
-          # explicit OpenSSL init, diagnostic SSL/OpenSSL/X509 errors and no
-          # SSL_shutdown() after a failed handshake.
           p=Path('AmiGPT68K/src/amiga/amiga_tls.c')
           s=p.read_text()
-          if '#include <errno.h>' not in s:
-              s=s.replace('#include <stdio.h>','#include <stdio.h>\n#include <errno.h>',1)
           s=s.replace('    SSL *ssl;\n};','    SSL *ssl;\n    int handshake_ok;\n};')
           s=s.replace('    if(c->ssl){SSL_shutdown(c->ssl);SSL_free(c->ssl);c->ssl=0;}',
                       '    if(c->ssl){if(c->handshake_ok)SSL_shutdown(c->ssl);SSL_free(c->ssl);c->ssl=0;}')
-          s=s.replace('        AmiSSL_SocketBase,(ULONG)SocketBase,TAG_DONE)',
-                      '        AmiSSL_SocketBase,(ULONG)SocketBase,\n        AmiSSL_ErrNoPtr,(ULONG)&errno,TAG_DONE)')
-          s=s.replace('    AmiSSLBase=c->AmiSSLBase;\n    c->ctx=SSL_CTX_new(TLS_client_method());',
-                      '    AmiSSLBase=c->AmiSSLBase;\n    if(OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT | OPENSSL_INIT_ADD_ALL_CIPHERS | OPENSSL_INIT_ADD_ALL_DIGESTS,0)!=1){seterr(err,errcap,"OPENSSL_init_ssl failed");goto fail;}\n    c->ctx=SSL_CTX_new(TLS_client_method());')
-          old='    if(SSL_connect(c->ssl)!=1){seterr(err,errcap,"TLS handshake failed");goto fail;}\n    return c;'
-          new='''    {\n        int sr;\n        ERR_clear_error();\n        sr=SSL_connect(c->ssl);\n        if(sr!=1){\n            int se=SSL_get_error(c->ssl,sr);\n            unsigned long oe=ERR_get_error();\n            long vr=SSL_get_verify_result(c->ssl);\n            char obuf[160];\n            const char *vmsg=X509_verify_cert_error_string(vr);\n            if(oe){\n                ERR_error_string_n(oe,obuf,sizeof obuf);\n                snprintf(err,errcap,"TLS handshake failed: ssl=%d verify=%ld (%s) openssl=%s",se,vr,vmsg?vmsg:"?",obuf);\n            }else{\n                snprintf(err,errcap,"TLS handshake failed: ssl=%d verify=%ld (%s)",se,vr,vmsg?vmsg:"?");\n            }\n            goto fail;\n        }\n        c->handshake_ok=1;\n    }\n    return c;'''
-          if old not in s:
-              raise SystemExit('SSL_connect pattern not found')
-          s=s.replace(old,new,1)
+          s=s.replace('    if(SSL_connect(c->ssl)!=1){seterr(err,errcap,"TLS handshake failed");goto fail;}\n    return c;',
+                      '    if(SSL_connect(c->ssl)!=1){seterr(err,errcap,"TLS handshake failed");goto fail;}\n    c->handshake_ok=1;\n    return c;')
           p.write_text(s)
 
-          # Keep crypto helper correct for the remaining legacy/PKCE paths.
-          p=Path('AmiGPT68K/src/amiga/amiga_crypto.c')
+          p=Path('AmiGPT68K/src/amiga/device_auth.c')
           s=p.read_text()
-          if '#include <errno.h>' not in s:
-              s=s.replace('#include <stdio.h>','#include <stdio.h>\n#include <errno.h>',1)
-          s=s.replace('        AmiSSL_SocketBase,(ULONG)socket_base,TAG_DONE)',
-                      '        AmiSSL_SocketBase,(ULONG)socket_base,\n        AmiSSL_ErrNoPtr,(ULONG)&errno,TAG_DONE)')
+          s=s.replace('    if(amigpt_crypto_open(SocketBase,err,errcap)<0)goto out;\n    if(request_code(&dc,err,errcap)<0)goto out_crypto;',
+                      '    puts("[device] bsdsocket open");fflush(stdout);\n    if(amigpt_crypto_open(SocketBase,err,errcap)<0)goto out;\n    puts("[device] AmiSSL crypto open");fflush(stdout);\n    puts("[device] requesting one-time code");fflush(stdout);\n    if(request_code(&dc,err,errcap)<0)goto out_crypto;\n    puts("[device] one-time code response OK");fflush(stdout);')
+          s=s.replace('    while(waited<900){\n        if(amigpt_https_post_json("auth.openai.com","/api/accounts/deviceauth/token",body,&r,err,errcap)<0)return -1;',
+                      '    while(waited<900){\n        printf("[poll] t=%lu request\\n",waited);fflush(stdout);\n        if(amigpt_https_post_json("auth.openai.com","/api/accounts/deviceauth/token",body,&r,err,errcap)<0){printf("[poll] transport failed: %s\\n",err);fflush(stdout);return -1;}\n        printf("[poll] HTTP %d body=%lu bytes\\n",r.status,(unsigned long)r.len);fflush(stdout);')
           p.write_text(s)
 
-          assert 'TLS handshake failed: ssl=' in Path('AmiGPT68K/src/amiga/amiga_tls.c').read_text()
-          assert 'amigpt_crypto_open(SocketBase' not in Path('AmiGPT68K/src/amiga/device_auth.c').read_text()
+          assert 'AmiGPT 68K v0.5' in Path('AmiGPT68K/src/amiga/main_cli.c').read_text()
+          assert '[poll] t=' in Path('AmiGPT68K/src/amiga/device_auth.c').read_text()
+          assert 'OPENSSL_init_ssl' not in Path('AmiGPT68K/src/amiga/amiga_tls.c').read_text()
+          assert 'amigpt_crypto_open(SocketBase' in Path('AmiGPT68K/src/amiga/device_auth.c').read_text()
           PY
 
       - name: Run portable core tests
@@ -114,7 +100,7 @@ jobs:
             docker.io/amigadev/crosstools:m68k-amigaos \
             sh -c 'set -e; export PATH=/opt/m68k-amigaos/bin:$PATH; make clean; make amiga-all'
 
-      - name: Verify v0.4 binaries
+      - name: Verify v0.5 binaries
         shell: bash
         run: |
           python3 - <<'PY'
@@ -122,11 +108,11 @@ jobs:
           import struct,subprocess
           for n in ['AmiGPT020','AmiGPT030FPU','AmiGPT040']:
               p=Path('AmiGPT68K/build/amiga')/n
-              d=p.read_bytes()
-              assert struct.unpack('>I',d[:4])[0]==0x3f3
+              d=p.read_bytes(); assert struct.unpack('>I',d[:4])[0]==0x3f3
               st=subprocess.check_output(['strings',str(p)],text=True,errors='ignore')
-              for x in ['AmiGPT 68K v0.4','$STACK:131072','TLS handshake failed: ssl=','OPENSSL_init_ssl failed']:
+              for x in ['AmiGPT 68K v0.5','$STACK:131072','[device] requesting one-time code','[poll] HTTP']:
                   assert x in st,(n,x)
+              assert 'OPENSSL_init_ssl failed' not in st
               print(n,len(d),'verified')
           PY
 
@@ -135,11 +121,11 @@ jobs:
         run: |
           mkdir -p dist
           for n in AmiGPT020 AmiGPT030FPU AmiGPT040; do cp AmiGPT68K/build/amiga/$n dist/; cp AmiGPT68K/build/amiga/$n.info dist/; done
-          printf '%s\n' 'AmiGPT 68K v0.4 TLS diagnostic build' 'Fix: no nested AmiSSL instance in DEVICELOGIN' 'Fix: no SSL_shutdown after failed handshake' 'Adds SSL_get_error + X509 verify + OpenSSL error diagnostics' > dist/BUILD-VERIFIED.txt
-          (cd dist && zip -9 ../AmiGPT68K-v0.4-TLSFIX.zip *)
+          printf '%s\n' 'AmiGPT 68K v0.5 conservative diagnostic build' 'Restores v0.3 AmiSSL/TLS initialization that reached the one-time code' 'Only TLS change: SSL_shutdown runs after successful handshake' 'Adds per-poll checkpoints and HTTP status diagnostics' > dist/BUILD-VERIFIED.txt
+          (cd dist && zip -9 ../AmiGPT68K-v0.5-CONSERVATIVE.zip *)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AmiGPT68K-v0.4-TLSFIX
-          path: AmiGPT68K-v0.4-TLSFIX.zip
+          name: AmiGPT68K-v0.5-CONSERVATIVE
+          path: AmiGPT68K-v0.5-CONSERVATIVE.zip
           if-no-files-found: error
