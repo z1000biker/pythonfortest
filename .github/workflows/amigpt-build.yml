@@ -19,45 +19,49 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat amigpt-src.part_* > /tmp/amigpt-src.tgz.b64
+          cat amigpt-src.part_00 amigpt-src.part_01 amigpt-src.part_02 amigpt-src.part_03 \
+              amigpt-src.part_04_00 amigpt-src.part_04_01 \
+              amigpt-src.part_05_00 amigpt-src.part_05_01 \
+              amigpt-src.part_06_00 amigpt-src.part_06_01 \
+              amigpt-src.part_07_00 amigpt-src.part_07_01 > /tmp/amigpt-src.tgz.b64
           echo "4e6b19738e26bd9a746461e49ce29a598e9db2d9795a2fe36fa7f6c832a3dc1c  /tmp/amigpt-src.tgz.b64" | sha256sum -c -
           base64 -d /tmp/amigpt-src.tgz.b64 > /tmp/amigpt-src.tgz
           echo "700a20733bd41303bf81237b3a4b6c5cb217e859660cac79bf99f7336cf1c71b  /tmp/amigpt-src.tgz" | sha256sum -c -
           tar -xzf /tmp/amigpt-src.tgz
           test -f AmiGPT68K/Makefile
-          echo "source bundle restored and verified"
+
+      - name: Apply AmiGPT v0.2 overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat amigpt-v02-overlay.part_00 amigpt-v02-overlay.part_01 \
+              amigpt-v02-overlay.part_02 amigpt-v02-overlay.part_03 > /tmp/amigpt-v02-overlay.tgz.b64
+          echo "5538bcd282240bbe37360f2ebf4a4d995e78b4bbd765aa739982336fb5933712  /tmp/amigpt-v02-overlay.tgz.b64" | sha256sum -c -
+          base64 -d /tmp/amigpt-v02-overlay.tgz.b64 > /tmp/amigpt-v02-overlay.tgz
+          echo "302dbbcbbaa73f4c5974e8f9dde617a7cedf1e3fe6512e5421ec4d788da9b270  /tmp/amigpt-v02-overlay.tgz" | sha256sum -c -
+          tar -xzf /tmp/amigpt-v02-overlay.tgz
+          grep -q DEVICELOGIN AmiGPT68K/src/amiga/main_cli.c
+          echo "v0.2 overlay applied"
 
       - name: Apply Amiga NDK compatibility fixes
         shell: bash
         run: |
-          python3 - <<'PY'
+          python3 - <<'PYFIX'
           from pathlib import Path
-
           p=Path('AmiGPT68K/src/amiga/amiga_crypto.c')
           s=p.read_text()
           if '#include <utility/tagitem.h>' not in s:
               s=s.replace('#include <proto/amisslmaster.h>', '#include <utility/tagitem.h>\n#include <proto/amisslmaster.h>', 1)
           p.write_text(s)
-
           p=Path('AmiGPT68K/src/amiga/oauth_loopback.c')
-          s=p.read_text()
-          if 'INADDR_LOOPBACK' not in s:
-              raise SystemExit('expected INADDR_LOOPBACK not found')
-          p.write_text(s.replace('INADDR_LOOPBACK','0x7f000001UL'))
-
+          s=p.read_text().replace('INADDR_LOOPBACK','0x7f000001UL')
+          p.write_text(s)
           p=Path('AmiGPT68K/src/amiga/login_flow.c')
           s=p.read_text()
           if '#include <dos/dostags.h>' not in s:
               s='#include <dos/dostags.h>\n'+s
           p.write_text(s)
-
-          p=Path('AmiGPT68K/Makefile')
-          s=p.read_text()
-          if '-lnet' in s:
-              s=s.replace(' -lnet','')
-          p.write_text(s)
-          print('NDK/link compatibility fixes applied')
-          PY
+          PYFIX
 
       - name: Run portable core tests
         shell: bash
@@ -73,27 +77,25 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD/AmiGPT68K:/src" \
             -w /src \
-            docker.io/amigadev/crosstools:m68k-amigaos \
-            sh -c 'set -e; export PATH=/opt/m68k-amigaos/bin:$PATH; command -v m68k-amigaos-gcc; m68k-amigaos-gcc --version; make clean; make amiga-all'
+            docker.io/amigadev/crosstools:m68k-amigaos-gcc10 \
+            sh -lc 'set -e; m68k-amigaos-gcc --version; make clean; make amiga-all'
 
-      - name: Verify HUNK executables
+      - name: Verify HUNK executables and v0.2 command set
         shell: bash
         run: |
-          python3 - <<'PY'
+          python3 - <<'PYVERIFY'
           from pathlib import Path
-          import struct
+          import struct, subprocess
           for n in ['AmiGPT020','AmiGPT030FPU','AmiGPT040']:
               p=Path('AmiGPT68K/build/amiga')/n
-              if not p.exists():
-                  raise SystemExit(f'missing {p}')
               data=p.read_bytes()
-              if len(data) < 4:
-                  raise SystemExit(f'too short {p}')
-              magic=struct.unpack('>I', data[:4])[0]
-              print(n, len(data), hex(magic))
-              if magic != 0x3f3:
+              if struct.unpack('>I',data[:4])[0] != 0x3f3:
                   raise SystemExit(f'not HUNK: {p}')
-          PY
+              out=subprocess.check_output(['strings',str(p)],text=True,errors='ignore')
+              if 'DEVICELOGIN' not in out or 'api.openai.com' not in out:
+                  raise SystemExit(f'missing real client code in {p}')
+              print(n, len(data), 'HUNK OK, DEVICELOGIN present')
+          PYVERIFY
 
       - name: Package executables
         shell: bash
@@ -106,10 +108,10 @@ jobs:
           done
           cp AmiGPT68K/icons/AmiWebAuth.info dist/
           cp AmiGPT68K/README.md dist/README-source-status.txt
-          (cd dist && zip -9 ../AmiGPT68K-real-build.zip *)
+          (cd dist && zip -9 ../AmiGPT68K-v0.2-real-build.zip *)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AmiGPT68K-real-build
-          path: AmiGPT68K-real-build.zip
+          name: AmiGPT68K-v0.2-real-build
+          path: AmiGPT68K-v0.2-real-build.zip
           if-no-files-found: error
