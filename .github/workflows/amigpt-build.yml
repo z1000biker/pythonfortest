@@ -42,7 +42,7 @@ jobs:
             -v "$PWD/AmiGPT68K:/src" \
             -w /src \
             docker.io/amigadev/crosstools:m68k-amigaos \
-            bash -lc 'set -e; echo PATH=$PATH; command -v m68k-amigaos-gcc; m68k-amigaos-gcc --version; ls -d /opt/* 2>/dev/null || true; make clean; make amiga-all'
+            sh -c 'set -e; export PATH=/opt/m68k-amigaos/bin:$PATH; echo PATH=$PATH; command -v m68k-amigaos-gcc; m68k-amigaos-gcc --version; find /opt/m68k-amigaos -maxdepth 3 \( -name "libamissl*" -o -name "amisslmaster.h" \) -print | head -50 || true; make clean; make amiga-all'
 
       - name: Verify HUNK executables
         shell: bash
