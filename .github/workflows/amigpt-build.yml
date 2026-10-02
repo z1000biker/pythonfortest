@@ -15,15 +15,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reassemble source bundle
+      - name: Reassemble and verify source bundle
         shell: bash
         run: |
           set -euo pipefail
           cat amigpt-src.part_* > /tmp/amigpt-src.tgz.b64
+          echo "4e6b19738e26bd9a746461e49ce29a598e9db2d9795a2fe36fa7f6c832a3dc1c  /tmp/amigpt-src.tgz.b64" | sha256sum -c -
           base64 -d /tmp/amigpt-src.tgz.b64 > /tmp/amigpt-src.tgz
+          echo "700a20733bd41303bf81237b3a4b6c5cb217e859660cac79bf99f7336cf1c71b  /tmp/amigpt-src.tgz" | sha256sum -c -
           tar -xzf /tmp/amigpt-src.tgz
           test -f AmiGPT68K/Makefile
-          echo "source bundle restored"
+          echo "source bundle restored and verified"
 
       - name: Run portable core tests
         shell: bash
