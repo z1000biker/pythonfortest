@@ -1,4 +1,4 @@
-name: AmiGPT 68K v0.5 Conservative Device Debug
+name: AmiGPT 68K v0.6 Single AmiSSL Device Fix
 
 on:
   push:
@@ -30,63 +30,96 @@ jobs:
           base64 -d /tmp/amigpt-v02-overlay.tgz.b64 > /tmp/amigpt-v02-overlay.tgz
           tar -xzf /tmp/amigpt-v02-overlay.tgz -C AmiGPT68K
 
-      - name: Apply v0.5 conservative fixes and checkpoints
+      - name: Apply v0.6 minimal runtime fix
         shell: bash
         run: |
+          set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
+          # Proven NDK compatibility fixes.
           p=Path('AmiGPT68K/src/amiga/amiga_crypto.c')
           s=p.read_text()
           if '#include <utility/tagitem.h>' not in s:
               s=s.replace('#include <proto/amisslmaster.h>', '#include <utility/tagitem.h>\n#include <proto/amisslmaster.h>', 1)
           p.write_text(s)
+
           p=Path('AmiGPT68K/src/amiga/oauth_loopback.c')
           p.write_text(p.read_text().replace('INADDR_LOOPBACK','0x7f000001UL'))
+
           p=Path('AmiGPT68K/src/amiga/login_flow.c')
           s=p.read_text()
           if '#include <dos/dostags.h>' not in s:
               s='#include <dos/dostags.h>\n'+s
           p.write_text(s)
 
+          # AmiSSL needs a large stack on classic AmigaOS.
           p=Path('AmiGPT68K/src/amiga/main_cli.c')
           s=p.read_text()
           if '$STACK:131072' not in s:
               s=s.replace('#include <stdio.h>\n','#include <stdio.h>\n\nconst char stack_size[] = "$STACK:131072";\n',1)
-          s=s.replace('AmiGPT 68K v0.2','AmiGPT 68K v0.5')
+          s=s.replace('AmiGPT 68K v0.2','AmiGPT 68K v0.6')
           p.write_text(s)
 
-          for fn in ['AmiGPT68K/src/amiga/amiga_crypto.c','AmiGPT68K/src/amiga/amiga_tls.c']:
+          # Match AmiSSL's OS3 examples: provide errno pointer. Do not add any
+          # explicit OPENSSL_init_ssl() call; the earlier build that reached the
+          # device code did not need it.
+          for fn,var in [
+              ('AmiGPT68K/src/amiga/amiga_crypto.c','socket_base'),
+              ('AmiGPT68K/src/amiga/amiga_tls.c','SocketBase')]:
               p=Path(fn); s=p.read_text()
               if '#include <errno.h>' not in s:
                   s=s.replace('#include <stdio.h>','#include <stdio.h>\n#include <errno.h>',1)
-              s=s.replace('AmiSSL_SocketBase,(ULONG)socket_base,TAG_DONE)',
-                          'AmiSSL_SocketBase,(ULONG)socket_base,\n        AmiSSL_ErrNoPtr,(ULONG)&errno,TAG_DONE)')
-              s=s.replace('AmiSSL_SocketBase,(ULONG)SocketBase,TAG_DONE)',
-                          'AmiSSL_SocketBase,(ULONG)SocketBase,\n        AmiSSL_ErrNoPtr,(ULONG)&errno,TAG_DONE)')
+              needle=f'AmiSSL_SocketBase,(ULONG){var},TAG_DONE)'
+              repl=f'AmiSSL_SocketBase,(ULONG){var},\n        AmiSSL_ErrNoPtr,(ULONG)&errno,TAG_DONE)'
+              if 'AmiSSL_ErrNoPtr' not in s:
+                  if needle not in s:
+                      raise SystemExit(f'AmiSSL tag pattern not found in {fn}')
+                  s=s.replace(needle,repl,1)
               p.write_text(s)
 
-          p=Path('AmiGPT68K/src/amiga/amiga_tls.c')
-          s=p.read_text()
-          s=s.replace('    SSL *ssl;\n};','    SSL *ssl;\n    int handshake_ok;\n};')
-          s=s.replace('    if(c->ssl){SSL_shutdown(c->ssl);SSL_free(c->ssl);c->ssl=0;}',
-                      '    if(c->ssl){if(c->handshake_ok)SSL_shutdown(c->ssl);SSL_free(c->ssl);c->ssl=0;}')
-          s=s.replace('    if(SSL_connect(c->ssl)!=1){seterr(err,errcap,"TLS handshake failed");goto fail;}\n    return c;',
-                      '    if(SSL_connect(c->ssl)!=1){seterr(err,errcap,"TLS handshake failed");goto fail;}\n    c->handshake_ok=1;\n    return c;')
-          p.write_text(s)
-
+          # DEVICELOGIN must NOT keep a second AmiSSL instance open while the
+          # HTTPS layer opens its own instance. The original v0.3 did exactly
+          # that, which made the task state non-deterministic across requests.
           p=Path('AmiGPT68K/src/amiga/device_auth.c')
           s=p.read_text()
-          s=s.replace('    if(amigpt_crypto_open(SocketBase,err,errcap)<0)goto out;\n    if(request_code(&dc,err,errcap)<0)goto out_crypto;',
-                      '    puts("[device] bsdsocket open");fflush(stdout);\n    if(amigpt_crypto_open(SocketBase,err,errcap)<0)goto out;\n    puts("[device] AmiSSL crypto open");fflush(stdout);\n    puts("[device] requesting one-time code");fflush(stdout);\n    if(request_code(&dc,err,errcap)<0)goto out_crypto;\n    puts("[device] one-time code response OK");fflush(stdout);')
-          s=s.replace('    while(waited<900){\n        if(amigpt_https_post_json("auth.openai.com","/api/accounts/deviceauth/token",body,&r,err,errcap)<0)return -1;',
-                      '    while(waited<900){\n        printf("[poll] t=%lu request\\n",waited);fflush(stdout);\n        if(amigpt_https_post_json("auth.openai.com","/api/accounts/deviceauth/token",body,&r,err,errcap)<0){printf("[poll] transport failed: %s\\n",err);fflush(stdout);return -1;}\n        printf("[poll] HTTP %d body=%lu bytes\\n",r.status,(unsigned long)r.len);fflush(stdout);')
+          s=s.replace('#include "amiga_crypto.h"\n','')
+          old='''    if(amigpt_crypto_open(SocketBase,err,errcap)<0)goto out;\n    if(request_code(&dc,err,errcap)<0)goto out_crypto;'''
+          new='''    if(request_code(&dc,err,errcap)<0)goto out;'''
+          if old not in s:
+              raise SystemExit('DEVICELOGIN outer AmiSSL open pattern not found')
+          s=s.replace(old,new,1)
+          s=s.replace('goto out_crypto;','goto out;')
+          s=s.replace('out_crypto:\n    amigpt_crypto_close();\n','')
           p.write_text(s)
 
-          assert 'AmiGPT 68K v0.5' in Path('AmiGPT68K/src/amiga/main_cli.c').read_text()
-          assert '[poll] t=' in Path('AmiGPT68K/src/amiga/device_auth.c').read_text()
-          assert 'OPENSSL_init_ssl' not in Path('AmiGPT68K/src/amiga/amiga_tls.c').read_text()
-          assert 'amigpt_crypto_open(SocketBase' in Path('AmiGPT68K/src/amiga/device_auth.c').read_text()
+          # Never SSL_shutdown() a connection whose handshake did not complete.
+          # This keeps the failure cleanup path from invoking TLS shutdown on a
+          # half-created SSL state.
+          p=Path('AmiGPT68K/src/amiga/amiga_tls.c')
+          s=p.read_text()
+          if 'int handshake_ok;' not in s:
+              s=s.replace('    SSL *ssl;\n};','    SSL *ssl;\n    int handshake_ok;\n};',1)
+          old='if(c->ssl){SSL_shutdown(c->ssl);SSL_free(c->ssl);c->ssl=0;}'
+          new='if(c->ssl){if(c->handshake_ok)SSL_shutdown(c->ssl);SSL_free(c->ssl);c->ssl=0;}'
+          if old not in s:
+              raise SystemExit('TLS cleanup pattern not found')
+          s=s.replace(old,new,1)
+          old='if(SSL_connect(c->ssl)!=1){seterr(err,errcap,"TLS handshake failed");goto fail;}\n    return c;'
+          new='if(SSL_connect(c->ssl)!=1){seterr(err,errcap,"TLS handshake failed");goto fail;}\n    c->handshake_ok=1;\n    return c;'
+          if old not in s:
+              raise SystemExit('TLS handshake pattern not found')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+
+          dev=Path('AmiGPT68K/src/amiga/device_auth.c').read_text()
+          tls=Path('AmiGPT68K/src/amiga/amiga_tls.c').read_text()
+          assert 'amigpt_crypto_open(SocketBase' not in dev
+          assert 'out_crypto:' not in dev
+          assert 'OPENSSL_init_ssl' not in tls
+          assert 'if(c->handshake_ok)SSL_shutdown' in tls
+          assert 'AmiGPT 68K v0.6' in Path('AmiGPT68K/src/amiga/main_cli.c').read_text()
+          print('v0.6 minimal runtime fix applied')
           PY
 
       - name: Run portable core tests
@@ -100,32 +133,42 @@ jobs:
             docker.io/amigadev/crosstools:m68k-amigaos \
             sh -c 'set -e; export PATH=/opt/m68k-amigaos/bin:$PATH; make clean; make amiga-all'
 
-      - name: Verify v0.5 binaries
+      - name: Verify v0.6 binaries
         shell: bash
         run: |
+          set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
           import struct,subprocess
           for n in ['AmiGPT020','AmiGPT030FPU','AmiGPT040']:
               p=Path('AmiGPT68K/build/amiga')/n
-              d=p.read_bytes(); assert struct.unpack('>I',d[:4])[0]==0x3f3
+              d=p.read_bytes()
+              assert struct.unpack('>I',d[:4])[0]==0x3f3
               st=subprocess.check_output(['strings',str(p)],text=True,errors='ignore')
-              for x in ['AmiGPT 68K v0.5','$STACK:131072','[device] requesting one-time code','[poll] HTTP']:
+              for x in ['AmiGPT 68K v0.6','$STACK:131072','DEVICELOGIN','auth.openai.com']:
                   assert x in st,(n,x)
               assert 'OPENSSL_init_ssl failed' not in st
-              print(n,len(d),'verified')
+              print(n,len(d),'HUNK verified')
           PY
 
       - name: Package
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p dist
-          for n in AmiGPT020 AmiGPT030FPU AmiGPT040; do cp AmiGPT68K/build/amiga/$n dist/; cp AmiGPT68K/build/amiga/$n.info dist/; done
-          printf '%s\n' 'AmiGPT 68K v0.5 conservative diagnostic build' 'Restores v0.3 AmiSSL/TLS initialization that reached the one-time code' 'Only TLS change: SSL_shutdown runs after successful handshake' 'Adds per-poll checkpoints and HTTP status diagnostics' > dist/BUILD-VERIFIED.txt
-          (cd dist && zip -9 ../AmiGPT68K-v0.5-CONSERVATIVE.zip *)
+          for n in AmiGPT020 AmiGPT030FPU AmiGPT040; do
+            cp AmiGPT68K/build/amiga/$n dist/
+            cp AmiGPT68K/build/amiga/$n.info dist/
+          done
+          printf '%s\n' \
+            'AmiGPT 68K v0.6' \
+            'Runtime fix: DEVICELOGIN no longer nests a second AmiSSL instance' \
+            'Cleanup fix: SSL_shutdown only after successful handshake' \
+            'Keeps the v0.3 TLS initialization path; no OPENSSL_init_ssl experiment' > dist/BUILD-VERIFIED.txt
+          (cd dist && zip -9 ../AmiGPT68K-v0.6-SINGLE-AMISSL.zip *)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AmiGPT68K-v0.5-CONSERVATIVE
-          path: AmiGPT68K-v0.5-CONSERVATIVE.zip
+          name: AmiGPT68K-v0.6-SINGLE-AMISSL
+          path: AmiGPT68K-v0.6-SINGLE-AMISSL.zip
           if-no-files-found: error
