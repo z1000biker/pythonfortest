@@ -27,6 +27,32 @@ jobs:
           test -f AmiGPT68K/Makefile
           echo "source bundle restored and verified"
 
+      - name: Apply Amiga NDK compatibility fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p=Path('AmiGPT68K/src/amiga/amiga_crypto.c')
+          s=p.read_text()
+          if '#include <utility/tagitem.h>' not in s:
+              s=s.replace('#include <proto/amisslmaster.h>', '#include <utility/tagitem.h>\n#include <proto/amisslmaster.h>', 1)
+          p.write_text(s)
+
+          p=Path('AmiGPT68K/src/amiga/oauth_loopback.c')
+          s=p.read_text()
+          if 'INADDR_LOOPBACK' not in s:
+              raise SystemExit('expected INADDR_LOOPBACK not found')
+          p.write_text(s.replace('INADDR_LOOPBACK','0x7f000001UL'))
+
+          p=Path('AmiGPT68K/src/amiga/login_flow.c')
+          s=p.read_text()
+          if '#include <dos/dostags.h>' not in s:
+              s='#include <dos/dostags.h>\n'+s
+          p.write_text(s)
+          print('NDK compatibility fixes applied')
+          PY
+
       - name: Run portable core tests
         shell: bash
         run: |
@@ -42,7 +68,7 @@ jobs:
             -v "$PWD/AmiGPT68K:/src" \
             -w /src \
             docker.io/amigadev/crosstools:m68k-amigaos \
-            sh -c 'set -e; export PATH=/opt/m68k-amigaos/bin:$PATH; echo PATH=$PATH; command -v m68k-amigaos-gcc; m68k-amigaos-gcc --version; find /opt/m68k-amigaos -maxdepth 3 \( -name "libamissl*" -o -name "amisslmaster.h" \) -print | head -50 || true; make clean; make amiga-all'
+            sh -c 'set -e; export PATH=/opt/m68k-amigaos/bin:$PATH; command -v m68k-amigaos-gcc; m68k-amigaos-gcc --version; make clean; make amiga-all'
 
       - name: Verify HUNK executables
         shell: bash
